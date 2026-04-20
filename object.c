@@ -70,6 +70,22 @@ static const char *object_type_name(ObjectType type) {
     }
 }
 
+static int parse_object_type(const char *type_name, ObjectType *type_out) {
+    if (strcmp(type_name, "blob") == 0) {
+        *type_out = OBJ_BLOB;
+        return 0;
+    }
+    if (strcmp(type_name, "tree") == 0) {
+        *type_out = OBJ_TREE;
+        return 0;
+    }
+    if (strcmp(type_name, "commit") == 0) {
+        *type_out = OBJ_COMMIT;
+        return 0;
+    }
+    return -1;
+}
+
 static int write_all(int fd, const void *buf, size_t len) {
     const uint8_t *ptr = (const uint8_t *)buf;
     size_t written = 0;
@@ -220,7 +236,89 @@ cleanup:
 // The caller is responsible for calling free(*data_out).
 // Returns 0 on success, -1 on error (file not found, corrupt, etc.).
 int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
-    // TODO: Implement
-    (void)id; (void)type_out; (void)data_out; (void)len_out;
-    return -1;
+    if (!id || !type_out || !data_out || !len_out) return -1;
+
+    char path[512];
+    object_path(id, path, sizeof(path));
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    long file_size = ftell(f);
+    if (file_size < 0) {
+        fclose(f);
+        return -1;
+    }
+
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    uint8_t *file_data = malloc((size_t)file_size);
+    if (!file_data) {
+        fclose(f);
+        return -1;
+    }
+
+    if (file_size > 0 &&
+        fread(file_data, 1, (size_t)file_size, f) != (size_t)file_size) {
+        free(file_data);
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+
+    const uint8_t *header_end = memchr(file_data, '\0', (size_t)file_size);
+    if (!header_end) {
+        free(file_data);
+        return -1;
+    }
+
+    ObjectID actual_id;
+    compute_hash(file_data, (size_t)file_size, &actual_id);
+    if (memcmp(actual_id.hash, id->hash, HASH_SIZE) != 0) {
+        free(file_data);
+        return -1;
+    }
+
+    char type_name[16];
+    size_t payload_len;
+    if (sscanf((char *)file_data, "%15s %zu", type_name, &payload_len) != 2) {
+        free(file_data);
+        return -1;
+    }
+
+    if (parse_object_type(type_name, type_out) != 0) {
+        free(file_data);
+        return -1;
+    }
+
+    size_t header_len = (size_t)(header_end - file_data);
+    size_t actual_payload_len = (size_t)file_size - header_len - 1;
+    if (payload_len != actual_payload_len) {
+        free(file_data);
+        return -1;
+    }
+
+    void *payload = malloc(payload_len > 0 ? payload_len : 1);
+    if (!payload) {
+        free(file_data);
+        return -1;
+    }
+
+    if (payload_len > 0) {
+        memcpy(payload, header_end + 1, payload_len);
+    }
+
+    *data_out = payload;
+    *len_out = payload_len;
+
+    free(file_data);
+    return 0;
 }
